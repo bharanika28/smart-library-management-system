@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    function validBook(b) {
+      return b.title is string && b.title.size() > 0 && b.title.size() <= 200
+        && b.author is string && b.author.size() > 0 && b.author.size() <= 150
+        && b.totalCopies is int && b.totalCopies >= 0
+        && b.availableCopies is int && b.availableCopies >= 0
+        && b.availableCopies <= b.totalCopies;
+    }
+
+    // ---------- users ----------
+    // Self-registration can only create a "student". Admins are promoted by editing
+    // the role field in the Firebase console (see README).
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid)
+        && request.resource.data.role == 'student'
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 80;
+      allow update: if isAdmin()
+        || (isOwner(uid)
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.email == resource.data.email);
+      allow delete: if isAdmin();
+    }
+
+    // ---------- books ----------
+    match /books/{bookId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin() && validBook(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // ---------- borrow requests ----------
+    match /borrowRequests/{reqId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.studentId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasAll(['bookId', 'studentId', 'status']);
+      allow update: if isAdmin()
+        || (isOwner(resource.data.studentId)
+            && resource.data.status == 'pending'
+            && request.resource.data.status == 'cancelled'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancelledAt']));
+      allow delete: if isAdmin();
+    }
+
+    // ---------- issued / returned books ----------
+    match /borrowTransactions/{txId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.studentId == request.auth.uid);
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ---------- fines ----------
+    match /fines/{fineId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.studentId == request.auth.uid);
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ---------- library settings (loan period, fine rules) ----------
+    match /settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
